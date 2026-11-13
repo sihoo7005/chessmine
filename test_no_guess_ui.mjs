@@ -1,0 +1,461 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+
+const html=readFileSync('3d_minesweeper.html','utf8');
+const script=html.match(/<script>([\s\S]*?)<\/script>/)[1].replace('window.addEventListener("resize",resize);','window.__game={get state(){return {cells,mines,ended,hintKey,selectedClue,selectedClosed,clueRange,yaw,distance,visibleCells};},countMines,inferMoves,activate,tileStyle,paintLabel,layout2d,find2d,showHint,toggleFlag,setView,draw,setFind3d(fn){find3d=fn;},setInference(fn){inferMoves=fn;},setCluePositions(fn){cluePositions=fn;},setRandom(fn){Math.random=fn;}};window.addEventListener("resize",resize);');
+const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);
+function page(search,useDefaults=false,webgl=false,autoStart=true,savedSettings=new Map()){
+  const glCalls={bufferData:0,texImage2D:0,texSubImage2D:0};
+  const gl=new Proxy({}, {get(target,key){if(key==='getShaderParameter'||key==='getProgramParameter')return ()=>true;if(key in glCalls)return (...args)=>{glCalls[key]++;};if(typeof key==='string'&&key.toUpperCase()===key)return 1;return ()=>({});}});
+  const ctx2d=new Proxy({}, {get:(target,key)=>target[key]||(()=>{}),set:(target,key,value)=>(target[key]=value,true)});
+  class Element{
+    constructor(id){this.id=id;this.value='';this.hidden=false;this.disabled=false;this.open=false;this.textContent='';this.listeners={};this.children=[];this.style={};this.attributes={};const classes=new Set();this.classList={toggle(name,on){if(on)classes.add(name);else classes.delete(name);},add(name){classes.add(name);},remove(name){classes.delete(name);},contains(name){return classes.has(name);}};}
+    addEventListener(name,fn){this.listeners[name]=fn;}
+    click(){this.listeners.click?.({});}
+    setAttribute(name,value){this.attributes[name]=value} replaceChildren(...children){this.children=children;} append(...children){this.children.push(...children);} add(child){this.children.push(child);} setPointerCapture(){} focus(){} showModal(){this.open=true;} close(){this.open=false;this.listeners.close?.({});}
+    getContext(kind){return kind==='2d'?ctx2d:kind==='webgl'&&webgl?gl:null;} getBoundingClientRect(){return this.rect||{width:800,height:600,left:0,top:0,right:800,bottom:600};}
+    contains(node){return this===node||this.children.some(child=>child.contains?.(node));}
+  }
+  const elements=Object.fromEntries(ids.map(id=>[id,new Element(id)]));
+  for(const [id,fallback] of [['sizeInput','3'],['mineInput','2']])elements[id].value=useDefaults?html.match(new RegExp(`id="${id}"[^>]*value="([^"]+)"`))[1]:fallback;
+  elements.spacing.value='1.3';
+  for(const piece of ['K','R','B','Q','N'])elements['weight'+piece].value=html.match(new RegExp(`id="weight${piece}"[^>]*value="([^"]+)"`))[1];
+  const urls=new Map();let nextUrl=0,workers=0,lastWorkerOptions;
+  class FakeBlob{constructor(parts){this.text=parts.join('');}}
+  const fakeURL={createObjectURL(blob){const id=String(++nextUrl);urls.set(id,blob.text);return id;},revokeObjectURL(id){urls.delete(id);}};
+  class FakeWorker{
+    constructor(url){this.source=urls.get(url);this.terminated=false;workers++;}
+    terminate(){this.terminated=true;}
+    postMessage(data){lastWorkerOptions=data;setTimeout(()=>{if(this.terminated)return;const worker={postMessage:message=>{if(!this.terminated)this.onmessage?.({data:message});}};try{vm.runInNewContext(this.source,worker);worker.onmessage({data});}catch(error){this.onerror?.(error);}},0);}
+  }
+  let tick=0,nextInterval=0,confirmResult=true;const intervals=new Map();const events=[];const window={devicePixelRatio:1,listeners:{},addEventListener(name,fn){this.listeners[name]=fn;},dispatchEvent(event){events.push(event);this.listeners[event.type]?.(event);}};
+  const document={getElementById:id=>elements[id],createElement:tag=>new Element(tag),title:'',listeners:{},addEventListener(name,fn){this.listeners[name]=fn;}};
+  const localStorage={getItem:key=>savedSettings.get(key)||null,setItem:(key,value)=>savedSettings.set(key,value)};
+  const globals={window,document,localStorage,location:{search},URLSearchParams,URL:fakeURL,Blob:FakeBlob,Worker:FakeWorker,Option:class{constructor(text,value){this.text=text;this.value=value;}},CustomEvent:class{constructor(type,options){this.type=type;this.detail=options.detail;}},confirm:()=>confirmResult,setTimeout,clearTimeout,setInterval:fn=>{const id=++nextInterval;intervals.set(id,fn);return id;},clearInterval:id=>intervals.delete(id),performance:{now:()=>tick},console:{error(){}}};
+  vm.runInNewContext(script,globals);
+  if(autoStart){elements.difficultyDialog.close();elements.start.click();}
+  return{window,document,elements,glCalls,events,setConfirm(value){confirmResult=value;},advance(ms){tick+=ms;for(const fn of intervals.values())fn();},get workers(){return workers;},get lastWorkerOptions(){return lastWorkerOptions;}};
+}
+
+const initialPage=page('',true,false,false);assert.equal(initialPage.elements.difficultyDialog.open,true,'Difficulty selection must open on entry');assert.equal(initialPage.window.__game.state.cells.size,0,'A game must wait for difficulty selection');initialPage.elements.chooseEasy.click();assert.equal(initialPage.elements.difficultyDialog.open,false);assert.equal(initialPage.window.__game.state.cells.size,64);assert.equal(initialPage.window.__game.state.mines.size,10);
+const initialCustom=page('',true,false,false);initialCustom.elements.chooseCustom.click();assert.equal(initialCustom.elements.customDialog.open,true);initialCustom.elements.customClose.click();assert.equal(initialCustom.window.__game.state.cells.size,216,'Closing initial custom settings must start a game');
+const original=page('');
+assert.match(html,/<button id="hintButton">힌트<\/button>/);assert.match(html,/https:\/\/sihoo7005\.github\.io\/fly\/game\.html/);
+assert.equal(original.workers,0);assert.equal(original.window.__game.state.cells.size,27);
+const defaultPage=page('',true);assert.equal(defaultPage.window.__game.state.cells.size,216);assert.equal(defaultPage.window.__game.state.mines.size,35);
+for(const [difficulty,size,mines] of [['easy','4','10'],['normal','5','20'],['hard','6','35']]){const previous=defaultPage.window.__game.state.cells;defaultPage.elements.difficulty.value=difficulty;defaultPage.elements.difficulty.listeners.change();assert.equal(defaultPage.elements.sizeInput.value,size);assert.equal(defaultPage.elements.mineInput.value,mines);assert.equal(defaultPage.elements.customButton.hidden,true);assert.notEqual(defaultPage.window.__game.state.cells,previous,'Changing difficulty must start a new game');}
+defaultPage.elements.difficulty.value='custom';defaultPage.elements.difficulty.listeners.change();assert.equal(defaultPage.elements.customDialog.open,true);assert.equal(defaultPage.elements.customButton.hidden,false);defaultPage.elements.customClose.click();assert.equal(defaultPage.elements.customDialog.open,false);defaultPage.elements.customButton.click();assert.equal(defaultPage.elements.customDialog.open,true);defaultPage.elements.customDialog.listeners.click({target:defaultPage.elements.customDialog,clientX:-1,clientY:300});assert.equal(defaultPage.elements.customDialog.open,false);
+const beforeCustom=defaultPage.window.__game.state.cells;defaultPage.elements.customButton.click();defaultPage.elements.sizeInput.value='4';defaultPage.elements.mineInput.value='6';defaultPage.elements.customClose.click();assert.notEqual(defaultPage.window.__game.state.cells,beforeCustom,'Changing custom settings must start a new game');
+assert.equal(original.elements.weightK.value,'7');for(const piece of ['R','B','Q','N'])assert.equal(original.elements['weight'+piece].value,'1');
+const boardBeforeHelp=original.window.__game.state.cells;original.elements.helpButton.click();assert.equal(original.elements.helpDialog.open,true,'Help must open as a dialog');
+original.window.listeners.keydown({key:'r',target:{matches:()=>false}});assert.equal(original.window.__game.state.cells,boardBeforeHelp,'Game shortcuts must not run while help is open');
+original.elements.helpDialog.listeners.click({target:original.elements.helpDialog,clientX:400,clientY:300});assert.equal(original.elements.helpDialog.open,true,'Clicking inside the dialog must keep it open');
+original.elements.helpDialog.listeners.click({target:original.elements.helpDialog,clientX:-1,clientY:300});assert.equal(original.elements.helpDialog.open,false,'Clicking outside the dialog must close it');
+original.elements.helpButton.click();original.elements.helpClose.click();assert.equal(original.elements.helpDialog.open,false,'The close button must still close the dialog');assert.equal(original.window.__game.state.cells,boardBeforeHelp);
+original.elements.settingsButton.click();assert.equal(original.elements.settingsDialog.open,true,'Settings must open as a dialog');original.elements.settingsClose.click();assert.equal(original.elements.settingsDialog.open,false,'Settings must close');
+original.elements.settingsButton.click();original.elements.settingsDialog.listeners.click({target:original.elements.settingsDialog,clientX:400,clientY:300});assert.equal(original.elements.settingsDialog.open,true,'Clicking inside settings must keep it open');original.elements.settingsDialog.listeners.click({target:original.elements.settingsDialog,clientX:-1,clientY:300});assert.equal(original.elements.settingsDialog.open,false,'Clicking outside settings must close it');
+const game=page('?mode=no-guess');
+assert.equal(original.elements.customReasoningLabel.hidden,true);assert.equal(game.elements.customReasoningLabel.hidden,false);
+assert.equal(game.elements.start.disabled,true);assert.equal(game.window.__game.state.cells.size,0);
+for(let i=0;i<100&&game.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+assert.equal(game.elements.start.disabled,false);assert.match(game.elements.boardInfo.textContent,/추측 없이/);
+game.elements.chooseNormal.click();assert.equal(game.lastWorkerOptions.maxSources,2);game.elements.cancelGeneration.click();
+game.elements.chooseEasy.click();assert.equal(game.lastWorkerOptions.maxSources,1);game.elements.cancelGeneration.click();
+game.elements.chooseCustom.click();game.elements.customReasoning.value='2';game.elements.customClose.click();assert.equal(game.lastWorkerOptions.maxSources,2);game.elements.cancelGeneration.click();
+game.elements.helpButton.click();assert.equal(game.elements.helpDialog.open,true);game.elements.helpClose.click();assert.equal(game.elements.helpDialog.open,false);
+const defaultNoGuess=page('?mode=no-guess',true);for(let i=0;i<100&&defaultNoGuess.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+assert.equal(defaultNoGuess.window.__game.state.cells.size,216);assert.equal(defaultNoGuess.window.__game.state.mines.size,35);
+const state=game.window.__game.state,opened=[...state.cells].filter(([,cell])=>cell.revealed);
+assert.equal(state.cells.size,27);assert.equal(opened.length,1);assert.equal(state.mines.size,2);
+assert.equal(game.window.__game.countMines(opened[0][0].split(',').map(Number),opened[0][1].piece),0);
+game.elements.start.click();game.elements.cancelGeneration.click();
+assert.equal(game.elements.start.disabled,false);assert.match(game.elements.message.textContent,/취소/);
+assert.equal(game.window.__game.state.cells,state.cells);
+function setBoard(p,mineIds){const s=p.window.__game.state;for(const cell of s.cells.values()){cell.revealed=false;cell.flagged=false;cell.piece='K';}s.mines.clear();for(const id of mineIds)s.mines.add(id);s.cells.get('0,0,0').revealed=true;return s;}
+for(const p of [original,game]){
+  const s=setBoard(p,['0,0,1','2,2,2']),app=p.window.__game,clue='0,0,0',target='0,1,0';
+  app.activate(clue,false);
+  assert.equal(app.state.clueRange.size,7);assert.ok(app.state.clueRange.has('0,0,1'));assert.equal(app.tileStyle(target,s.cells.get(target)).fill,'#438c80');
+  assert.equal([...s.cells.values()].filter(c=>c.revealed).length,1,'Selecting a clue must not open its range');
+  app.activate(clue,false);
+  assert.equal([...s.cells.values()].filter(c=>c.revealed).length,1,'A different flag count must not open cells');
+  app.activate('0,0,1',true);app.activate(clue,false);app.activate(clue,false);
+  assert.equal([...s.cells.values()].filter(c=>c.revealed).length,7,'A matching flag count must open the six remaining neighbors');
+  assert.equal(s.cells.get('0,0,1').flagged,true);assert.equal(s.cells.get('2,2,2').revealed,false);
+}
+for(const p of [page(''),game]){
+  const s=setBoard(p,['0,0,1','2,2,2']),app=p.window.__game,canvas=p.elements.board,{cols,s:scale,left,top}=app.layout2d();
+  function tap2d(x,y,z,button=0){const event={pointerId:5,button,clientX:left+(z%cols)*(3+.58)*scale+(x+.5)*scale,clientY:top+Math.floor(z/cols)*(3+.42+.3)*scale+(.42+y+.5)*scale};canvas.listeners.pointerdown(event);canvas.listeners.pointerup(event);}
+  p.elements.flagMode.click();tap2d(0,0,1);
+  assert.equal(s.cells.get('0,0,1').flagged,true,'A closed cell must still toggle a flag in flag mode');
+  tap2d(0,0,0);assert.equal(app.state.selectedClue,'0,0,0');assert.equal(app.state.clueRange.size,7);
+  p.advance(451);tap2d(0,0,0);assert.equal([...s.cells.values()].filter(c=>c.revealed).length,1,'Slow taps must not chord in flag mode');
+  tap2d(0,0,0);assert.equal([...s.cells.values()].filter(c=>c.revealed).length,7,'Two quick taps must chord an opened clue in flag mode');
+  assert.equal(s.cells.get('0,0,1').flagged,true);
+}
+const flag3dPage=page(''),flag3d=setBoard(flag3dPage,['0,0,1','2,2,2']);let picked='0,0,1';
+flag3dPage.window.__game.setFind3d(()=>picked);flag3dPage.elements.flagMode.click();
+const flag3dEvent={pointerId:8,button:0,clientX:400,clientY:300};
+function tap3d(event=flag3dEvent){flag3dPage.elements.board3d.listeners.pointerdown(event);flag3dPage.elements.board3d.listeners.pointerup(event);}
+tap3d();assert.equal(flag3d.cells.get('0,0,1').flagged,true);picked='0,0,0';tap3d();
+assert.equal(flag3dPage.window.__game.state.clueRange.size,7);tap3d();assert.equal([...flag3d.cells.values()].filter(c=>c.revealed).length,7);
+const zeroPage=page(''),zero=setBoard(zeroPage,['2,2,1','2,2,2']);
+zeroPage.window.__game.activate('0,0,0',false);zeroPage.window.__game.activate('0,0,0',false);
+assert.equal([...zero.cells.values()].filter(c=>c.revealed).length,8,'A zero clue must open its entire unflagged range');
+for(const p of [page(''),game]){
+  const s=setBoard(p,['2,2,1','2,2,2']);s.cells.get('2,2,1').flagged=true;
+  const canvas=p.elements.board,event={pointerId:12,button:0,clientX:1,clientY:1};
+  function backgroundTap(){canvas.listeners.pointerdown(event);canvas.listeners.pointerup(event);}
+  backgroundTap();assert.equal([...s.cells.values()].filter(c=>c.revealed).length,1,'One background tap must not expand');
+  p.advance(451);backgroundTap();assert.equal([...s.cells.values()].filter(c=>c.revealed).length,1,'Slow background taps must not expand');
+  backgroundTap();assert.equal([...s.cells.values()].filter(c=>c.revealed).length,2,'Expansion must open only one cell at first');
+  for(let i=0;i<150&&!p.elements.cellInfo.textContent.includes('개방 완료');i++)await new Promise(resolve=>setTimeout(resolve,20));
+  assert.match(p.elements.cellInfo.textContent,/개방 완료/);assert.equal(s.cells.get('0,0,2').revealed,true,'Quick background taps must recursively expand zero clues across layers');
+  assert.equal(s.cells.get('2,2,1').flagged,true);assert.equal(s.cells.get('2,2,1').revealed,false,'Expansion must leave flagged cells closed');
+  for(const id of s.mines)assert.equal(s.cells.get(id).revealed,false,'Zero expansion must not open a mine');
+  if(p.window.__game.state.ended){p.elements.start.click();for(let i=0;i<100&&p.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));}
+}
+const background3dPage=page(''),background3d=setBoard(background3dPage,['2,2,1','2,2,2']);background3d.cells.get('2,2,1').flagged=true;background3dPage.window.__game.setFind3d(()=>null);
+const background3dEvent={pointerId:13,button:0,clientX:10,clientY:10};
+for(let i=0;i<2;i++){background3dPage.elements.board3d.listeners.pointerdown(background3dEvent);background3dPage.elements.board3d.listeners.pointerup(background3dEvent);}
+for(let i=0;i<150&&!background3dPage.elements.cellInfo.textContent.includes('개방 완료');i++)await new Promise(resolve=>setTimeout(resolve,20));
+assert.equal(background3d.cells.get('0,0,2').revealed,true,'Double tapping empty 3D space must expand zero clues');
+if(background3dPage.window.__game.state.ended)background3dPage.elements.start.click();
+const nonzeroPage=page(''),nonzero=setBoard(nonzeroPage,['0,0,1','2,2,2']);nonzeroPage.window.__game.activate(null,false);nonzeroPage.window.__game.activate(null,false);
+assert.equal([...nonzero.cells.values()].filter(c=>c.revealed).length,1,'Hidden zero clues must not be expanded');
+const chainPage=page(''),chain=setBoard(chainPage,['2,2,1','2,2,2']),chainMap=new Map([['0,0,0',['1,0,0']],['1,0,0',['2,0,0']],['2,0,0',['2,2,2']]]);
+const instantSettings=new Map(),instantPage=page('',false,false,true,instantSettings),instant=setBoard(instantPage,['2,2,1','2,2,2']);instantPage.elements.expansionMode.checked=true;instantPage.elements.expansionMode.listeners.change();instantPage.window.__game.setCluePositions(pos=>(chainMap.get(pos.join(','))||[]).map(id=>id.split(',').map(Number)));instantPage.window.__game.activate(null,false);instantPage.window.__game.activate(null,false);assert.equal(instant.cells.get('2,0,0').revealed,true,'Instant mode must open the whole chain without a timer');assert.equal(instant.cells.get('1,1,1').revealed,false);assert.equal(page('',false,false,true,instantSettings).elements.expansionMode.checked,true,'Expansion setting must persist');instantPage.elements.expansionMode.checked=false;instantPage.elements.expansionMode.listeners.change();assert.equal(page('',false,false,true,instantSettings).elements.expansionMode.checked,false,'Turning instant mode off must persist');
+chainPage.window.__game.setCluePositions(pos=>(chainMap.get(pos.join(','))||[]).map(id=>id.split(',').map(Number)));
+chainPage.window.__game.activate(null,false);chainPage.window.__game.activate(null,false);
+assert.equal(chain.cells.get('1,0,0').revealed,true);assert.equal(chain.cells.get('2,0,0').revealed,false,'The next cell must wait for the animation');
+for(let i=0;i<100&&!chainPage.elements.cellInfo.textContent.includes('개방 완료');i++)await new Promise(resolve=>setTimeout(resolve,20));
+assert.equal(chain.cells.get('1,0,0').revealed,true);assert.equal(chain.cells.get('2,0,0').revealed,true,'New zero clues must continue the chain');
+assert.equal(chain.cells.get('1,1,1').revealed,false,'Expansion must stop beyond a nonzero clue');
+const matchedPage=page(''),matched=setBoard(matchedPage,['0,0,1','2,2,2']);matched.cells.get('0,0,1').flagged=true;
+matchedPage.window.__game.activate(null,false);matchedPage.window.__game.activate(null,false);
+assert.equal(matched.cells.get('0,1,0').revealed,true,'A nonzero clue with the matching flag count must open its unflagged range');
+assert.equal(matched.cells.get('0,0,1').flagged,true);matchedPage.window.__game.activate('2,0,0',true);
+const flaggedChainPage=page(''),flaggedChain=setBoard(flaggedChainPage,['2,2,1','2,2,2']);flaggedChain.cells.get('2,2,2').flagged=true;
+const flaggedChainMap=new Map([['0,0,0',['1,0,0']],['1,0,0',['2,0,0','2,2,2']],['2,0,0',['2,2,1']]]);
+flaggedChainPage.window.__game.setCluePositions(pos=>(flaggedChainMap.get(pos.join(','))||[]).map(id=>id.split(',').map(Number)));
+flaggedChainPage.window.__game.activate(null,false);flaggedChainPage.window.__game.activate(null,false);
+for(let i=0;i<100&&!flaggedChainPage.elements.cellInfo.textContent.includes('개방 완료');i++)await new Promise(resolve=>setTimeout(resolve,20));
+assert.equal(flaggedChain.cells.get('2,0,0').revealed,true,'Newly opened nonzero clues with matching flags must also expand');
+assert.equal(flaggedChain.cells.get('2,2,1').revealed,false,'A clue with a mismatched flag count must not expand');
+const badFlagPage=page(''),badFlag=setBoard(badFlagPage,['0,0,1','2,2,2']);badFlag.cells.get('0,1,0').flagged=true;
+badFlagPage.window.__game.activate(null,false);badFlagPage.window.__game.activate(null,false);
+assert.equal(badFlagPage.window.__game.state.ended,true);assert.equal(badFlag.cells.get('0,0,1').revealed,true,'Incorrect flags must cause the same loss as manually opening a clue range');
+const interruptPage=page(''),interrupt=setBoard(interruptPage,['2,2,1','2,2,2']);interruptPage.window.__game.activate(null,false);interruptPage.window.__game.activate(null,false);
+assert.equal([...interrupt.cells.values()].filter(c=>c.revealed).length,2);interruptPage.window.__game.activate('2,1,0',true);
+await new Promise(resolve=>setTimeout(resolve,100));assert.equal([...interrupt.cells.values()].filter(c=>c.revealed).length,2,'A player action must stop the pending expansion');
+const restartPage=page('');setBoard(restartPage,['2,2,1','2,2,2']);restartPage.window.__game.activate(null,false);restartPage.window.__game.activate(null,false);
+restartPage.elements.start.click();const restarted=restartPage.window.__game.state.cells;await new Promise(resolve=>setTimeout(resolve,100));
+assert.equal(restarted,restartPage.window.__game.state.cells);assert.equal([...restarted.values()].filter(c=>c.revealed).length,1,'A pending expansion must not affect a new game');
+const backgroundWinPage=page(''),backgroundWin=setBoard(backgroundWinPage,['2,2,1','2,2,2']);
+for(const[id,cell]of backgroundWin.cells)if(!backgroundWin.mines.has(id))cell.revealed=id!=='0,1,0';
+backgroundWinPage.window.__game.activate(null,false);backgroundWinPage.window.__game.activate(null,false);
+assert.equal(backgroundWinPage.window.__game.state.ended,true);assert.equal(backgroundWinPage.elements.successEffect.hidden,false,'Expansion must trigger success when it opens the final safe cell');backgroundWinPage.elements.start.click();
+for(const newPage of [page(''),game]){
+const newBoard=setBoard(newPage,['2,2,1','2,2,2']);
+newPage.window.__game.activate('0,0,1',false);
+assert.equal(newBoard.cells.get('0,0,1').revealed,false,'A single tap must not open a closed cell');
+assert.equal(newPage.window.__game.state.selectedClosed,'0,0,1');
+newPage.advance(451);newPage.window.__game.activate('0,0,1',false);
+assert.equal(newBoard.cells.get('0,0,1').revealed,false,'Slow taps must not open a closed cell');
+newPage.window.__game.activate('0,0,1',false);
+assert.equal(newBoard.cells.get('0,0,1').revealed,true,'A quick second tap must open the cell');
+assert.equal(newPage.window.__game.state.selectedClue,null,'Opening a cell must not select its movement range');assert.equal(newPage.window.__game.state.clueRange.size,0);
+newPage.window.__game.activate('0,0,1',false);assert.equal(newPage.window.__game.state.selectedClue,'0,0,1');assert.ok(newPage.window.__game.state.clueRange.size>0,'A later tap on the opened piece must show its range');
+newPage.advance(451);newPage.window.__game.activate('0,0,1',false);
+assert.equal([...newBoard.cells.values()].filter(c=>c.revealed).length,2,'Slow taps must not chord a clue');
+newPage.window.__game.activate('0,0,1',false);
+assert.ok([...newBoard.cells.values()].filter(c=>c.revealed).length>2,'A quick second tap on an opened zero clue must open its range');
+}
+const wrongPage=page(''),wrong=setBoard(wrongPage,['0,0,1','2,2,2']);
+wrongPage.window.__game.activate('0,1,0',true);wrongPage.window.__game.activate('0,0,0',false);wrongPage.window.__game.activate('0,0,0',false);
+assert.equal(wrongPage.window.__game.state.ended,true);assert.equal(wrong.cells.get('0,0,1').revealed,true,'An incorrect flag must not protect another mine');
+assert.equal(wrongPage.elements.successEffect.hidden,true,'Losing must not show the success effect');
+assert.equal(wrongPage.window.__game.tileStyle('0,0,1',wrong.cells.get('0,0,1')).text,'✹','A lost game must still show mines');
+const postLossOpened=[...wrong.cells.values()].filter(c=>c.revealed).length;wrongPage.window.__game.activate('0,0,0',false);assert.equal(wrongPage.window.__game.state.selectedClue,'0,0,0');assert.ok(wrongPage.window.__game.state.clueRange.size>0,'An opened piece must show its range after losing');assert.equal([...wrong.cells.values()].filter(c=>c.revealed).length,postLossOpened,'Post-game taps must not reveal cells');wrongPage.window.__game.activate(null,false);assert.equal(wrongPage.window.__game.state.clueRange.size,0);
+const successNoGuess=page('?mode=no-guess');
+for(let i=0;i<100&&successNoGuess.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+for(const p of [page(''),successNoGuess]){
+  const s=setBoard(p,['0,0,1','2,2,2']);for(const[id,cell]of s.cells)if(!s.mines.has(id))cell.revealed=id!=='0,1,0';
+  s.cells.get('0,0,1').flagged=true;p.window.__game.activate('0,0,0',false);p.window.__game.activate('0,0,0',false);
+  assert.equal(p.window.__game.state.ended,true);assert.equal(p.elements.successEffect.hidden,false,'Winning by chord must show the success effect');
+  for(const id of s.mines){const style=p.window.__game.tileStyle(id,s.cells.get(id));assert.equal(style.text,'✿','Every mine, including flagged mines, must become a flower on success');assert.equal(style.fill,'#405f57');}
+  p.window.__game.activate('0,0,0',false);assert.equal(p.window.__game.state.selectedClue,'0,0,0','An opened piece must remain selectable after winning');assert.ok(p.window.__game.state.clueRange.size>0);
+  p.elements.start.click();assert.equal(p.elements.successEffect.hidden,true,'Starting a new game must dismiss the success effect');
+  for(let i=0;i<100&&p.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+  const next=p.window.__game.state,nextMine=[...next.mines][0];assert.equal(p.window.__game.tileStyle(nextMine,next.cells.get(nextMine)).text,'','A new game must hide its mines again');
+}
+const directWinPage=page(''),directWin=setBoard(directWinPage,['0,0,1','2,2,2']);
+for(const[id,cell]of directWin.cells)if(!directWin.mines.has(id))cell.revealed=id!=='0,1,0';
+directWinPage.window.__game.activate('0,1,0',false);directWinPage.window.__game.activate('0,1,0',false);
+assert.equal(directWinPage.elements.successEffect.hidden,false,'Opening the final safe cell must show the success effect');directWinPage.elements.start.click();
+const flatPage=page(''),flat=setBoard(flatPage,['2,2,1','2,2,2']),layout=flatPage.window.__game.layout2d();
+const flatEvent={pointerId:1,button:0,clientX:layout.left+1.5*layout.s,clientY:layout.top+1.92*layout.s};
+const threePage=page(''),three=setBoard(threePage,['2,2,1','2,2,2']);threePage.window.__game.setFind3d(()=> '1,1,0');
+const threeEvent={pointerId:2,button:0,clientX:400,clientY:300};
+flatPage.window.__game.activate('1,1,0',false);threePage.window.__game.activate('1,1,0',false);
+flatPage.elements.board.listeners.pointerdown(flatEvent);threePage.elements.board3d.listeners.pointerdown(threeEvent);
+await new Promise(resolve=>setTimeout(resolve,550));
+flatPage.elements.board.listeners.pointerup(flatEvent);threePage.elements.board3d.listeners.pointerup(threeEvent);
+for(const s of [flat,three]){assert.equal(s.cells.get('1,1,0').flagged,true,'A long press must toggle a flag');assert.equal(s.cells.get('1,1,0').revealed,false,'Releasing a long press must not open the cell');}
+const dragPage=page(''),drag=setBoard(dragPage,['2,2,1','2,2,2']);dragPage.window.__game.setFind3d(()=> '1,1,0');
+dragPage.elements.board3d.listeners.pointerdown(threeEvent);dragPage.elements.board3d.listeners.pointermove({...threeEvent,clientX:420});
+const flatDragPage=page(''),flatDrag=setBoard(flatDragPage,['2,2,1','2,2,2']);
+flatDragPage.elements.board.listeners.pointerdown(flatEvent);flatDragPage.elements.board.listeners.pointermove({...flatEvent,clientX:flatEvent.clientX+20});
+const pinchPage=page(''),pinch=setBoard(pinchPage,['2,2,1','2,2,2']);pinchPage.window.__game.setFind3d(()=> '1,1,0');
+const beforeDistance=pinchPage.window.__game.state.distance,secondFinger={...threeEvent,pointerId:3,clientX:440};
+pinchPage.elements.board3d.listeners.pointerdown(threeEvent);pinchPage.elements.board3d.listeners.pointerdown(secondFinger);
+pinchPage.elements.board3d.listeners.pointermove({...secondFinger,clientX:480});
+await new Promise(resolve=>setTimeout(resolve,550));dragPage.elements.board3d.listeners.pointerup({...threeEvent,clientX:420});
+flatDragPage.elements.board.listeners.pointerup({...flatEvent,clientX:flatEvent.clientX+20});
+pinchPage.elements.board3d.listeners.pointerup({...secondFinger,clientX:480});pinchPage.elements.board3d.listeners.pointerup(threeEvent);
+assert.equal(drag.cells.get('1,1,0').flagged,false,'Dragging must cancel the long press');assert.notEqual(dragPage.window.__game.state.yaw,.72);
+assert.equal(flatDrag.cells.get('1,1,0').flagged,false,'Moving in 2D must cancel the long press');
+assert.equal(pinch.cells.get('1,1,0').flagged,false,'Pinching must cancel the long press');assert.ok(pinchPage.window.__game.state.distance<beforeDistance);
+const hintPage=page(''),hintBoard=setBoard(hintPage,['0,0,1','2,2,2']),hintApp=hintPage.window.__game,hintCell='0,0,1';
+async function confirmPromo(p,accept=true){const action=p.elements.hintButton.listeners.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(p.elements.promoConfirmDialog.open,true);p.elements[accept?'promoAccept':'promoCancel'].click();await action;}
+const promoPage=page(''),promoBoard=setBoard(promoPage,['0,0,1','2,2,2']);let credits=0,starts=0;promoPage.window.chessmineHints={state:()=> 'authenticated',owner:()=> '1',balance:async()=>({credits,premium:false}),start:async()=>{starts++;return{ticket:'test-ticket'}},claim:async()=>({credits:credits+=3}),use:async()=>({credits:--credits})};
+const promoArea=promoPage.elements.gameArea;promoArea.requestFullscreen=async()=>{promoPage.document.fullscreenElement=promoArea;promoPage.document.listeners.fullscreenchange();};promoPage.elements.fullscreenButton.click();await confirmPromo(promoPage,false);assert.equal(starts,0,'Cancelling must not start the promotion');assert.equal(promoPage.elements.hintPromoDialog.open,false);assert.equal(promoPage.document.fullscreenElement,promoArea,'Confirmation must not exit fullscreen');
+promoPage.window.__game.setInference(()=>({moves:[{key:'0,0,1',mine:true}],conflict:false}));await confirmPromo(promoPage);assert.equal(promoPage.document.fullscreenElement,promoArea,'Promotion must retain fullscreen');assert.equal(promoPage.elements.hintPromoDialog.open,true);assert.equal(promoPage.window.__game.state.hintKey,null,'Hint must wait for the promotion');assert.equal(promoPage.elements.promoClose.disabled,true);assert.equal(promoPage.elements.promoClose.textContent,'3');let blocked=false;promoPage.elements.hintPromoDialog.listeners.cancel({preventDefault(){blocked=true}});assert.equal(blocked,true);promoPage.elements.promoClose.click();assert.equal(promoPage.elements.hintPromoDialog.open,true);promoPage.advance(1000);assert.equal(promoPage.elements.promoClose.textContent,'2');promoPage.advance(1000);assert.equal(promoPage.elements.promoClose.textContent,'1');promoPage.advance(1000);assert.equal(promoPage.elements.promoClose.textContent,'×');assert.equal(promoPage.elements.promoClose.disabled,false);assert.equal(promoPage.window.__game.state.hintKey,null,'Hint waits until used');promoPage.elements.promoClose.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(promoPage.elements.hintPromoDialog.open,false);assert.equal(promoPage.window.__game.state.hintKey,null);assert.equal(credits,3,'Closing the promotion must grant three unused credits');
+await promoPage.elements.hintButton.listeners.click();assert.equal(promoPage.window.__game.state.hintKey,'0,0,1');assert.equal(credits,2);await promoPage.elements.hintButton.listeners.click();await promoPage.elements.hintButton.listeners.click();assert.equal(credits,0);assert.equal(starts,1,'Remaining credits must not show another promotion');await confirmPromo(promoPage);assert.equal(starts,2,'Zero credits must show the promotion again');
+const guestStorage=new Map(),guestPage=page('',false,false,true,guestStorage);setBoard(guestPage,['0,0,1','2,2,2']);guestPage.window.__game.setInference(()=>({moves:[{key:'0,0,1',mine:true}],conflict:false}));assert.equal(guestPage.elements.hintButton.textContent,'힌트 (0)');await confirmPromo(guestPage);assert.equal(guestPage.elements.hintPromoDialog.open,true);guestPage.advance(3000);guestPage.elements.promoClose.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(guestPage.elements.hintButton.textContent,'힌트 (3)');await guestPage.elements.hintButton.listeners.click();assert.equal(guestPage.elements.hintButton.textContent,'힌트 (2)');assert.equal(page('',false,false,true,guestStorage).elements.hintButton.textContent,'힌트 (0)','Guest hints must reset on reload');
+const offlinePage=page('');setBoard(offlinePage,['0,0,1','2,2,2']);offlinePage.window.__game.setInference(()=>({moves:[{key:'0,0,1',mine:true}],conflict:false}));offlinePage.window.chessmineHints={state:()=> 'authenticated',owner:()=> '1',balance:async()=>{throw new Error('network_unavailable')}};await confirmPromo(offlinePage);assert.equal(offlinePage.elements.hintPromoDialog.open,true,'Offline account access must fall back to temporary guest hints');offlinePage.advance(3000);offlinePage.elements.promoClose.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(offlinePage.elements.hintButton.textContent,'힌트 (3)');await offlinePage.elements.hintButton.listeners.click();assert.equal(offlinePage.elements.hintButton.textContent,'힌트 (2)');
+const premiumPromo=page('');setBoard(premiumPromo,['0,0,1','2,2,2']);let premiumCredits=0;premiumPromo.window.chessmineHints={state:()=> 'authenticated',owner:()=> '1',balance:async()=>({credits:premiumCredits,premium:true}),start:async()=>({ticket:'premium-ticket'}),claim:async()=>({credits:premiumCredits+=5}),use:async()=>({credits:--premiumCredits})};const premiumAction=premiumPromo.elements.hintButton.listeners.click();await new Promise(resolve=>setImmediate(resolve));assert.match(premiumPromo.elements.promoConfirmText.textContent,/5개/);premiumPromo.elements.promoAccept.click();await premiumAction;assert.match(premiumPromo.elements.promoReward.textContent,/5개/);premiumPromo.advance(3000);premiumPromo.elements.promoClose.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(premiumCredits,5);
+const groupPremium=page('?mode=no-guess-color');for(let i=0;i<100&&groupPremium.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));const groupBoard=setBoard(groupPremium,['0,0,1','2,2,2']),groupApp=groupPremium.window.__game;groupPremium.elements.autoGroupButton.click();assert.equal(groupPremium.elements.premiumNotice.hidden,false,'Free users must see the small premium notice');groupPremium.document.listeners.click({target:groupPremium.elements.board});assert.equal(groupPremium.elements.premiumNotice.hidden,true,'Clicking outside must close the notice');groupPremium.window.__game.setView('2d');const groupLayout=groupApp.layout2d(),heldClue={pointerId:91,button:0,clientX:groupLayout.left+.5*groupLayout.s,clientY:groupLayout.top+.92*groupLayout.s};groupPremium.elements.board.listeners.pointerdown(heldClue);await new Promise(resolve=>setTimeout(resolve,550));groupPremium.elements.board.listeners.pointerup(heldClue);assert.equal(groupPremium.elements.premiumNotice.hidden,true,'Long pressing a clue must stay silent for free users');assert.equal(groupPremium.elements.groupSelect.children.length,1);
+groupPremium.window.chessmineHints={state:()=> 'authenticated',owner:()=> '1',balance:async()=>({credits:15,premium:true,premiumTestAvailable:true}),setPremium:async enabled=>{groupPremium.window.dispatchEvent({type:'chessmine:hint-credits',detail:{credits:15,premium:enabled,premiumTestAvailable:true}});return{premium:enabled}}};groupPremium.window.dispatchEvent({type:'chessmine:hint-credits',detail:{credits:0,premium:false,premiumTestAvailable:true}});groupPremium.elements.premiumTest.checked=true;await groupPremium.elements.premiumTest.listeners.change();assert.equal(groupPremium.elements.premiumTest.checked,true);assert.equal(groupPremium.elements.hintButton.textContent,'힌트 (15)');groupBoard.cells.get('1,0,0').flagged=true;groupApp.draw();groupApp.activate('0,0,0',false);groupPremium.elements.autoGroupButton.click();await new Promise(resolve=>setImmediate(resolve));assert.match(groupPremium.elements.groupSelect.children[1].text,/0\/6/,'Automatic group must use remaining cells and mines');
+groupPremium.elements.board.listeners.pointerdown(heldClue);await new Promise(resolve=>setTimeout(resolve,550));groupPremium.elements.board.listeners.pointerup(heldClue);await new Promise(resolve=>setImmediate(resolve));assert.equal(groupPremium.elements.groupSelect.children.length,1,'Long pressing the same piece must remove its automatic group');groupPremium.elements.board.listeners.pointerdown(heldClue);await new Promise(resolve=>setTimeout(resolve,550));groupPremium.elements.board.listeners.pointerup(heldClue);await new Promise(resolve=>setImmediate(resolve));assert.equal(groupPremium.elements.groupSelect.children.length,2,'Long pressing again must create the group');groupApp.toggleFlag('1,0,0');groupPremium.elements.autoGroupButton.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(groupPremium.elements.groupSelect.children.length,1,'The same piece must remove its group even after flags change');const manualRange=[...groupApp.state.clueRange];groupPremium.elements.groupEdit.click();for(const id of manualRange)groupApp.activate(id,false);groupPremium.elements.groupMineCount.value='1';groupPremium.elements.groupSave.click();assert.equal(groupPremium.elements.groupSelect.children.length,2);groupApp.activate('0,0,0',false);groupPremium.elements.autoGroupButton.click();await new Promise(resolve=>setImmediate(resolve));assert.equal(groupPremium.elements.groupSelect.children.length,1,'An identical manual group must be removed instead of duplicated');
+const group3dPremium=page('?mode=no-guess-color',false,true);for(let i=0;i<100&&group3dPremium.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));setBoard(group3dPremium,['0,0,1','2,2,2']);group3dPremium.window.chessmineHints={state:()=> 'authenticated',owner:()=> '1',balance:async()=>({credits:15,premium:true,premiumTestAvailable:true})};group3dPremium.window.dispatchEvent({type:'chessmine:hint-credits',detail:{credits:15,premium:true,premiumTestAvailable:true}});group3dPremium.window.__game.setFind3d(()=> '0,0,0');const held3d={pointerId:92,button:0,clientX:100,clientY:100};group3dPremium.elements.board3d.listeners.pointerdown(held3d);await new Promise(resolve=>setTimeout(resolve,550));group3dPremium.elements.board3d.listeners.pointerup(held3d);await new Promise(resolve=>setImmediate(resolve));assert.equal(group3dPremium.elements.groupSelect.children.length,2,'Long pressing a revealed 3D piece must create a group');group3dPremium.elements.board3d.listeners.pointerdown(held3d);await new Promise(resolve=>setTimeout(resolve,550));group3dPremium.elements.board3d.listeners.pointerup(held3d);await new Promise(resolve=>setImmediate(resolve));assert.equal(group3dPremium.elements.groupSelect.children.length,1,'Long pressing the same 3D piece again must remove it');
+
+hintApp.setInference(()=>({moves:[{key:hintCell,mine:true}],conflict:false}));hintApp.showHint();
+const mineStyle=JSON.stringify(hintApp.tileStyle(hintCell,hintBoard.cells.get(hintCell))),mineMessage=hintPage.elements.cellInfo.textContent;
+hintApp.setInference(()=>({moves:[{key:hintCell,mine:false}],conflict:false}));hintApp.showHint();
+assert.equal(JSON.stringify(hintApp.tileStyle(hintCell,hintBoard.cells.get(hintCell))),mineStyle,'Mine and safe hints must look identical');
+assert.equal(hintPage.elements.cellInfo.textContent,mineMessage,'Mine and safe hints must use the same message');
+assert.doesNotMatch(mineMessage,/지뢰|안전|깃발/);
+hintApp.setRandom(()=>.9);hintApp.setInference(()=>({moves:[{key:hintCell,mine:true},{key:'1,1,0',mine:false}],conflict:false}));hintApp.showHint();
+assert.equal(hintApp.state.hintKey,hintCell,'Hints must not prefer safe cells over mines');
+hintApp.setInference(()=>({moves:[{key:'1,1,0',mine:false,sources:['0,0,0','0,1,0']},{key:hintCell,mine:true,sources:['0,0,0'],method:'direct'}],conflict:false}));hintApp.showHint();
+assert.equal(hintApp.state.hintKey,hintCell,'Hints with fewer source clues must be preferred independently of their type');
+hintApp.activate('0,0,0',false);assert.equal(hintApp.state.selectedClue,'0,0,0');assert.equal(hintApp.state.hintKey,hintCell,'Selecting a clue must retain the hint');
+assert.doesNotMatch(html,/id="hintExplanation"/,'Hint explanation panel must be removed');
+const comparePage=page(''),compareApp=comparePage.window.__game,compare=compareApp.state,compareIds=[...compare.cells.keys()],[p,q,a,b,c]=compareIds;
+for(const cell of compare.cells.values()){cell.revealed=false;cell.flagged=false;cell.piece='K';}compare.cells.get(p).revealed=true;compare.cells.get(q).revealed=true;compare.mines.clear();compare.mines.add(b);compare.mines.add(c);
+const clueMap=new Map([[p,[a,b]],[q,[a,b,c]]]);compareApp.setCluePositions(pos=>(clueMap.get(pos.join(','))||[]).map(id=>id.split(',').map(Number)));
+const inferred=compareApp.inferMoves().moves.find(move=>move.key===c);assert.equal(inferred.method,'compare');assert.deepEqual([...inferred.sources].sort(),[p,q].sort());
+compareApp.showHint();assert.ok(compareApp.state.hintKey,'Comparison hints must still be displayed');
+const searchPage=page(''),searchApp=searchPage.window.__game,search=searchApp.state,searchIds=[...search.cells.keys()],[p1,p2,p3,p4,a1,b1,c1,a2,b2,c2]=searchIds;
+for(const cell of search.cells.values()){cell.revealed=false;cell.flagged=false;cell.piece='K';}for(const id of [p1,p2,p3,p4])search.cells.get(id).revealed=true;
+search.mines.clear();search.mines.add(b1);search.mines.add(b2);const searchMap=new Map([[p1,[a1,b1]],[p2,[b1,c1]],[p3,[a2,b2]],[p4,[b2,c2]]]);
+searchApp.setCluePositions(pos=>(searchMap.get(pos.join(','))||[]).map(id=>id.split(',').map(Number)));
+const searchMove=searchApp.inferMoves().moves.find(move=>move.key===b1);assert.equal(searchMove.method,'search');
+searchApp.setInference(()=>({moves:[searchMove],conflict:false}));searchApp.showHint();
+assert.equal(searchApp.state.hintKey,b1,'Search hints must still be displayed');
+console.log('Verified both modes, fast double taps, long-press flags, and drag cancellation');
+
+const largePage=page(''),largeApp=largePage.window.__game;
+const mobilePage=page('',true),mobileApp=mobilePage.window.__game;mobilePage.elements.board2dScroller.rect={width:360,height:400,left:0,top:0};mobileApp.setView('2d');const mobileLayout=mobileApp.layout2d();assert.equal(mobileLayout.cols,2,'A standard mobile board should show two layers per row');assert.ok(mobileLayout.s>=24,'Mobile cells must remain at least 24 pixels wide');assert.equal(mobileApp.find2d(mobileLayout.left+1.5*mobileLayout.s,mobileLayout.top+2*(6+.42+.3)*mobileLayout.s+(.42+1.5)*mobileLayout.s),'1,1,4','Cells in the last row must remain selectable');
+largePage.elements.board2dScroller.rect={width:390,height:400,left:0,top:0};
+largePage.elements.sizeInput.value='10';largePage.elements.mineInput.value='50';largePage.elements.start.click();
+const largeLayout=largeApp.layout2d();
+assert.ok(largeLayout.s>=36,'Large boards must keep cells at least 36 pixels wide');
+assert.equal(largeLayout.cols,1,'Narrow screens should fit a layer across the viewport when possible');
+assert.ok(parseFloat(largePage.elements.board.style.height)>400,'Large boards must be scrollable');
+assert.equal(largePage.elements.board2dHint.hidden,false);
+const targetX=largeLayout.left+2.5*largeLayout.s,targetY=largeLayout.top+(9*10.72+.42+3.5)*largeLayout.s;
+assert.equal(largeApp.find2d(targetX,targetY),'2,3,9','The final layer must remain selectable');
+largeApp.setInference(()=>({moves:[{key:'2,3,9',mine:false}],conflict:false}));largeApp.showHint();
+assert.match(largePage.elements.cellInfo.textContent,/스크롤/, 'Off-screen hints should explain how to find them');
+
+const fullscreenPage=page(''),fullscreenArea=fullscreenPage.elements.gameArea,fullscreenButton=fullscreenPage.elements.fullscreenButton;
+fullscreenButton.click();
+assert.equal(fullscreenArea.classList.contains('expanded'),true,'Unsupported fullscreen should use expanded layout');
+assert.equal(fullscreenButton.attributes['aria-label'],'전체화면 종료');
+fullscreenPage.window.listeners.keydown({key:'Escape',target:{matches:()=>false}});
+assert.equal(fullscreenArea.classList.contains('expanded'),false,'Escape should exit expanded layout');
+assert.equal(fullscreenButton.attributes['aria-label'],'전체화면');
+fullscreenButton.click();fullscreenButton.click();
+assert.equal(fullscreenArea.classList.contains('expanded'),false,'Button should exit expanded layout');
+
+const nativePage=page(''),nativeArea=nativePage.elements.gameArea,nativeButton=nativePage.elements.fullscreenButton;
+nativeArea.requestFullscreen=async()=>{nativePage.document.fullscreenElement=nativeArea;nativePage.document.listeners.fullscreenchange();};
+nativePage.document.exitFullscreen=async()=>{nativePage.document.fullscreenElement=null;nativePage.document.listeners.fullscreenchange();};
+nativeButton.click();
+assert.equal(nativePage.document.fullscreenElement,nativeArea,'Button should enter native fullscreen when available');
+assert.equal(nativeButton.attributes['aria-label'],'전체화면 종료');
+nativeButton.click();
+assert.equal(nativePage.document.fullscreenElement,null,'Button should exit native fullscreen');
+assert.equal(nativeButton.attributes['aria-label'],'전체화면');
+
+const renderPage=page('',false,true),renderApp=renderPage.window.__game,renderCalls=renderPage.glCalls;
+const geometryUploads=renderCalls.bufferData,textureUploads=renderCalls.texImage2D,partialUploads=renderCalls.texSubImage2D;
+renderApp.draw();
+assert.equal(renderCalls.bufferData,geometryUploads,'An unchanged board must reuse geometry');
+assert.equal(renderCalls.texImage2D,textureUploads,'An unchanged board must reuse its texture');
+assert.equal(renderCalls.texSubImage2D,partialUploads,'An unchanged board must not upload tile images');
+const closedId=[...renderApp.state.cells].find(([,c])=>!c.revealed)[0];
+renderApp.toggleFlag(closedId);
+assert.equal(renderCalls.bufferData,geometryUploads,'Flagging must reuse geometry');
+assert.equal(renderCalls.texImage2D,textureUploads,'Flagging must not upload the whole texture');
+assert.equal(renderCalls.texSubImage2D,partialUploads+1,'Flagging must upload only the changed tile');
+renderPage.elements.spacing.value='1.5';renderPage.elements.spacing.listeners.input();
+assert.equal(renderCalls.bufferData,geometryUploads,'Changing spacing must reuse geometry');assert.equal(renderCalls.texImage2D,textureUploads,'Changing spacing must reuse the texture');assert.equal(renderCalls.texSubImage2D,partialUploads+1,'Changing spacing must not re-upload tiles');
+assert.equal(renderApp.state.visibleCells.length,27);assert.equal(renderApp.state.visibleCells.find(cell=>cell.key==='0,0,0').center[0],-1.5,'Hit-test centers must follow spacing');assert.doesNotMatch(html,/id="layer"/,'3D layer selector must be removed');
+const uploadsAfterLayout=renderCalls.bufferData;
+renderApp.setView('2d');
+const anotherClosed=[...renderApp.state.cells].find(([id,c])=>!c.revealed&&!c.flagged&&!renderApp.state.mines.has(id))[0];
+renderApp.toggleFlag(anotherClosed);
+const beforeReturnPartial=renderCalls.texSubImage2D;
+renderApp.setView('3d');
+assert.equal(renderCalls.bufferData,uploadsAfterLayout,'Returning from 2D must reuse unchanged 3D geometry');
+assert.equal(renderCalls.texSubImage2D,beforeReturnPartial+1,'Returning from 2D must update changed visible tiles');
+
+const clockPage=page(''),clockState=clockPage.window.__game.state;
+assert.equal(clockPage.elements.gameTime.textContent,'시간 00:00');
+clockPage.advance(65000);assert.equal(clockPage.elements.gameTime.textContent,'시간 01:05');
+clockPage.elements.fullscreenButton.click();
+const oldClockBoard=clockState.cells;clockPage.elements.start.click();
+assert.notEqual(clockPage.window.__game.state.cells,oldClockBoard,'Starting a game in fullscreen must replace the board');
+assert.equal(clockPage.elements.gameTime.textContent,'시간 00:00','A new game must reset the clock');
+clockPage.advance(2500);const clockMine=[...clockPage.window.__game.state.mines][0];
+clockPage.window.__game.activate(clockMine,false);clockPage.window.__game.activate(clockMine,false);
+assert.equal(clockPage.elements.gameTime.textContent,'시간 00:02');clockPage.advance(10000);
+assert.equal(clockPage.elements.gameTime.textContent,'시간 00:02','The clock must stop when the game ends');
+
+const colorPage=page('?mode=no-guess-color');
+for(let i=0;i<100&&colorPage.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+assert.equal(colorPage.elements.groupPanel.hidden,false,'Color mode must show group controls');
+const colorApp=colorPage.window.__game,colorBoard=colorApp.state;
+const colorIds=[...colorBoard.cells].filter(([id,c])=>!c.revealed&&!colorBoard.mines.has(id)).slice(0,4).map(([id])=>id);
+const badges=id=>colorApp.tileStyle(id,colorBoard.cells.get(id)).badges||[];
+colorPage.elements.groupEdit.click();for(const id of colorIds)colorApp.activate(id,false);
+assert.equal(colorPage.elements.groupEditor.hidden,false,'Group editor must be visible while selecting');
+assert.equal(colorPage.elements.groupManageLabel.hidden,true,'Group management must be replaced while editing');assert.equal(colorPage.elements.groupDelete.hidden,true);
+assert.equal(colorPage.elements.groupDraft.textContent,'칸 4개 선택');
+colorPage.elements.groupMineCount.value='1';colorPage.elements.groupMineUp.click();assert.equal(colorPage.elements.groupMineCount.value,'2');for(let i=0;i<5;i++)colorPage.elements.groupMineUp.click();assert.equal(colorPage.elements.groupMineCount.value,'4');for(let i=0;i<5;i++)colorPage.elements.groupMineDown.click();assert.equal(colorPage.elements.groupMineCount.value,'0');
+colorPage.elements.groupMineCount.value='2';colorPage.elements.groupSave.click();
+assert.equal(colorPage.elements.groupEditor.hidden,true,'Saving must close the group editor');
+assert.equal(colorPage.elements.groupManageLabel.hidden,false,'Group management must return after saving');
+assert.equal(badges(colorIds[0])[0].text,'2/4');const firstColor=badges(colorIds[0])[0].color;
+colorPage.elements.groupEdit.click();colorApp.activate(colorIds[2],false);colorApp.activate(colorIds[3],false);
+colorPage.elements.groupMineCount.value='1';colorPage.elements.groupSave.click();
+assert.equal(badges(colorIds[2]).length,2,'Overlapping groups must both be shown');
+assert.notEqual(badges(colorIds[2])[0].color,badges(colorIds[2])[1].color);
+const firstOnly=colorApp.tileStyle(colorIds[0],colorBoard.cells.get(colorIds[0])),overlap=colorApp.tileStyle(colorIds[2],colorBoard.cells.get(colorIds[2]));
+assert.equal(firstOnly.badges[0].slot,overlap.badges.find(b=>b.color===firstColor).slot,'A group must use the same slot on every cell');
+assert.equal(firstOnly.badgeCount,overlap.badgeCount,'Badge layout must use the same board-wide slot count');
+
+colorPage.elements.groupSelect.value='0';colorPage.elements.groupSelect.listeners.change();
+assert.equal(badges(colorIds[2]).length,2,'Choosing a group for management must not hide other groups');
+colorApp.toggleFlag(colorIds[0]);assert.equal(badges(colorIds[1]).find(b=>b.color===firstColor).text,'1/3');
+assert.match(colorPage.elements.groupSelect.children[1].text,/1\/3/,'Group list must reflect flags');
+colorApp.toggleFlag(colorIds[2]);assert.equal(badges(colorIds[1]).find(b=>b.color===firstColor).text,'0/2','A zero-mine group must stay visible');
+assert.match(colorPage.elements.groupSelect.children[1].text,/0\/2/,'Zero-mine groups must remain in the list');
+assert.doesNotMatch(colorPage.elements.groupSelect.children[1].text,/숨김/,'Zero-mine groups must not be labeled hidden');
+colorApp.toggleFlag(colorIds[2]);assert.equal(badges(colorIds[1]).find(b=>b.color===firstColor).text,'1/3','Unflagging must restore a hidden group');
+colorApp.activate(colorIds[1],false);colorApp.activate(colorIds[1],false);
+assert.equal(badges(colorIds[3]).find(b=>b.color===firstColor).text,'1/2','Opening a safe cell must reduce the denominator');
+assert.match(colorPage.elements.groupSelect.children[1].text,/1\/2/,'Group list must reflect opened cells');
+colorApp.toggleFlag(colorIds[0]);assert.equal(badges(colorIds[3]).find(b=>b.color===firstColor).text,'2/3','Unflagging must restore numerator and denominator');
+assert.match(colorPage.elements.groupSelect.children[1].text,/2\/3/,'Group list must restore counts after unflagging');
+assert.equal(colorPage.elements.groupSelect.value,'0','Updating group counts must preserve the selected group');
+colorPage.elements.groupDelete.click();
+assert.equal(badges(colorIds[3]).length,1,'Deleting one group must leave the other visible');
+colorPage.elements.start.click();for(let i=0;i<100&&colorPage.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+assert.equal(colorPage.elements.groupSelect.value,'','A newly generated board must clear groups');
+const color3dPage=page('?mode=no-guess-color',false,true);
+for(let i=0;i<100&&color3dPage.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+const color3dApp=color3dPage.window.__game,color3dState=color3dApp.state;
+const color3dId=[...color3dState.cells].find(([,cell])=>!cell.revealed)[0];
+color3dPage.elements.flagMode.click();color3dPage.elements.groupEdit.click();
+const color3dUploads=color3dPage.glCalls.texSubImage2D;
+color3dApp.activate(color3dId,false);color3dPage.elements.groupMineCount.value='1';color3dPage.elements.groupSave.click();
+assert.equal(color3dApp.tileStyle(color3dId,color3dState.cells.get(color3dId)).badges[0].text,'1/1');
+assert.ok(color3dPage.glCalls.texSubImage2D>color3dUploads,'Saving a group must update the 3D texture');
+const beforeDeleteUpload=color3dPage.glCalls.texSubImage2D;assert.equal(color3dPage.elements.groupDelete.disabled,false);color3dPage.elements.groupDelete.click();assert.equal(color3dApp.tileStyle(color3dId,color3dState.cells.get(color3dId)).badges.length,0,'Deleting a selected group must remove its 3D badge');assert.ok(color3dPage.glCalls.texSubImage2D>beforeDeleteUpload,'Deleting a group must update the 3D texture');assert.equal(color3dPage.elements.groupDelete.disabled,true);
+color3dPage.elements.groupEdit.click();color3dApp.activate(color3dId,false);color3dPage.elements.groupMineCount.value='1';color3dPage.elements.groupSave.click();
+color3dPage.elements.groupEdit.click();color3dApp.activate(color3dId,false);color3dPage.elements.groupMineCount.value='2';color3dPage.elements.groupSave.click();
+assert.match(color3dPage.elements.groupStatus.textContent,/입력/,'A group cannot contain more mines than cells');
+colorPage.elements.flagMode.click();colorPage.elements.groupEdit.click();
+const pointerId=[...colorApp.state.cells].find(([,cell])=>!cell.revealed&&!cell.flagged)[0];
+const [gx,gy,gz]=pointerId.split(',').map(Number),gLayout=colorApp.layout2d();
+const groupTap={pointerId:17,button:0,clientX:gLayout.left+(gz%gLayout.cols)*(3+.58)*gLayout.s+(gx+.5)*gLayout.s,clientY:gLayout.top+Math.floor(gz/gLayout.cols)*(3+.72)*gLayout.s+(.42+gy+.5)*gLayout.s};
+colorPage.elements.board.listeners.pointerdown(groupTap);colorPage.elements.board.listeners.pointerup(groupTap);
+assert.equal(colorApp.state.cells.get(pointerId).flagged,false,'Flag mode must not affect normal taps while editing');assert.equal(colorPage.elements.groupDraft.textContent,'칸 1개 선택');
+colorApp.activate(pointerId,true);assert.equal(colorApp.state.cells.get(pointerId).flagged,true,'Long press must flag a cell while editing');assert.equal(colorPage.elements.groupDraft.textContent,'칸 0개 선택','Flagged cells must leave the draft');colorApp.activate(pointerId,true);colorApp.activate(pointerId,false);assert.equal(colorPage.elements.groupDraft.textContent,'칸 1개 선택');
+
+const shownClue=[...colorApp.state.cells].find(([,cell])=>cell.revealed)[0];
+colorApp.activate(shownClue,false);
+assert.equal(colorApp.state.selectedClue,shownClue,'An open piece must show its range while editing a group');
+assert.ok(colorApp.state.clueRange.size>0);
+assert.equal(colorPage.elements.groupDraft.textContent,'칸 1개 선택','Showing a range must preserve the draft group');
+const rangeCell=[...colorApp.state.clueRange].find(id=>!colorApp.state.cells.get(id).revealed&&!colorApp.state.cells.get(id).flagged);
+if(rangeCell)assert.equal(colorApp.tileStyle(rangeCell,colorApp.state.cells.get(rangeCell)).fill,'#438c80','The clue range must be green while editing');
+colorApp.activate(shownClue,false);
+assert.equal(colorApp.state.selectedClue,shownClue,'A second tap in group mode must not auto-open cells');
+const painted=[];const paintContext={strokeText(){},fillText(text,x,y,maxWidth){painted.push({text,x,y,maxWidth,font:this.font,align:this.textAlign});}};
+colorApp.paintLabel(paintContext,{badges:[{text:'1/2',color:'red'},{text:'1/3',color:'blue'},{text:'2/5',color:'green'}]},50,50,100);
+assert.equal(painted.length,3);assert.ok(painted.some(b=>b.align==='left'&&b.x<50));assert.ok(painted.some(b=>b.align==='right'&&b.x>50));
+assert.equal(painted[0].font,'700 22px system-ui','Three badges must use two rows instead of shrinking to three');
+const color3dClue=[...color3dState.cells].find(([,cell])=>cell.revealed)[0];
+const beforeRangeOpen=[...color3dState.cells.values()].filter(cell=>cell.revealed).length;
+color3dApp.activate(color3dClue,false);color3dApp.activate(color3dClue,false);
+assert.equal(color3dApp.state.selectedClue,color3dClue,'3D group editing must show the piece range');
+assert.equal([...color3dState.cells.values()].filter(cell=>cell.revealed).length,beforeRangeOpen,'Repeated taps must not open the range during group editing');
+
+colorApp.activate(null,false);
+assert.equal(colorApp.state.selectedClue,null,'Tapping the background must clear the selected piece while editing');
+assert.equal(colorApp.state.clueRange.size,0,'Tapping the background must clear the green range');
+assert.equal(colorPage.elements.groupDraft.textContent,'칸 1개 선택','Clearing the range must preserve the group draft');
+color3dApp.activate(null,false);
+assert.equal(color3dApp.state.selectedClue,null,'Background tapping must also clear the 3D range');
+assert.equal(color3dApp.state.clueRange.size,0);
+
+const stablePage=page('?mode=no-guess-color');
+for(let i=0;i<100&&stablePage.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+const stableApp=stablePage.window.__game,stableState=stableApp.state,stableIds=[...stableState.cells].filter(([,c])=>!c.revealed).slice(0,4).map(([id])=>id);
+for(const ids of [[stableIds[0],stableIds[1]],[stableIds[1],stableIds[2]],[stableIds[1],stableIds[3]]]){stablePage.elements.groupEdit.click();for(const id of ids)stableApp.activate(id,false);stablePage.elements.groupMineCount.value='1';stablePage.elements.groupSave.click();}
+const oneStyle=stableApp.tileStyle(stableIds[0],stableState.cells.get(stableIds[0])),manyStyle=stableApp.tileStyle(stableIds[1],stableState.cells.get(stableIds[1]));
+const positions=style=>{const out=[];const context={strokeText(){},fillText(text,x,y){out.push({color:this.fillStyle,x,y,font:this.font});}};stableApp.paintLabel(context,style,50,50,100);return out;};
+const onePosition=positions(oneStyle)[0],samePosition=positions(manyStyle).find(p=>p.color===onePosition.color);
+assert.deepEqual(onePosition,samePosition,'The same color must have the same position and size across differently overlapping cells');
+
+const disjointPage=page('?mode=no-guess-color');
+for(let i=0;i<100&&disjointPage.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+const disjointApp=disjointPage.window.__game,disjointState=disjointApp.state,groupTestIds=[...disjointState.cells].filter(([,c])=>!c.revealed).slice(0,4).map(([id])=>id);
+function saveGroup(groupIds){disjointPage.elements.groupEdit.click();for(const id of groupIds)disjointApp.activate(id,false);disjointPage.elements.groupMineCount.value='1';disjointPage.elements.groupSave.click();}
+saveGroup([groupTestIds[0],groupTestIds[1]]);saveGroup([groupTestIds[2],groupTestIds[3]]);
+const firstDisjoint=disjointApp.tileStyle(groupTestIds[0],disjointState.cells.get(groupTestIds[0])).badges[0],secondDisjoint=disjointApp.tileStyle(groupTestIds[2],disjointState.cells.get(groupTestIds[2])).badges[0];
+assert.notEqual(firstDisjoint.color,secondDisjoint.color);
+assert.equal(firstDisjoint.slot,secondDisjoint.slot,'Disjoint groups should reuse a label position');
+for(let i=0;i<10;i++)saveGroup([groupTestIds[1]]);
+saveGroup([groupTestIds[0]]);
+const sparseStyle=disjointApp.tileStyle(groupTestIds[0],disjointState.cells.get(groupTestIds[0])),crowdedStyle=disjointApp.tileStyle(groupTestIds[1],disjointState.cells.get(groupTestIds[1]));
+const sparsePos=positions(sparseStyle).find(p=>p.color===firstDisjoint.color),crowdedPos=positions(crowdedStyle).find(p=>p.color===firstDisjoint.color);
+assert.deepEqual(sparsePos,crowdedPos,'A group must keep its position and font size even when overlap varies');
+const sparsePositions=positions(sparseStyle);assert.ok(sparsePositions.some(p=>p.font!==sparsePos.font),'One cell can contain labels of different sizes');
+const disjointPos=positions(disjointApp.tileStyle(groupTestIds[2],disjointState.cells.get(groupTestIds[2])))[0];
+assert.equal(disjointPos.x,sparsePos.x);assert.equal(disjointPos.y,sparsePos.y);
+assert.equal(disjointPos.font,'700 22px system-ui','An independent group should remain large');
+
+const recordPage=page(''),recordState=recordPage.window.__game.state;
+assert.equal(recordPage.events.length,0,'An unfinished game must not emit a result');
+recordPage.advance(3200);const lostMine=[...recordState.mines][0];
+recordPage.window.__game.activate(lostMine,false);recordPage.window.__game.activate(lostMine,false);
+assert.equal(recordPage.events.length,1);
+const loss=recordPage.events[0];assert.equal(loss.type,'chessmine:game-finished');
+assert.equal(loss.detail.result,'lost');assert.equal(loss.detail.mode,'normal');assert.equal(loss.detail.size,3);assert.equal(loss.detail.mines,2);assert.equal(loss.detail.durationMs,3200);assert.equal(loss.detail.weights.K,7);
+recordPage.window.__game.activate(lostMine,false);assert.equal(recordPage.events.length,1,'A finished game must emit only once');
+const recordNoGuess=page('?mode=no-guess-color');for(let i=0;i<100&&recordNoGuess.elements.start.disabled;i++)await new Promise(resolve=>setTimeout(resolve,50));
+const noGuessMine=[...recordNoGuess.window.__game.state.mines][0];recordNoGuess.window.__game.activate(noGuessMine,false);recordNoGuess.window.__game.activate(noGuessMine,false);
+assert.equal(recordNoGuess.events[0].detail.mode,'no-guess-color');
+const winRecordPage=page(''),winRecordState=winRecordPage.window.__game.state;
+for(const [id,cell] of winRecordState.cells)cell.revealed=!winRecordState.mines.has(id);
+const finalSafe=[...winRecordState.cells].find(([id])=>!winRecordState.mines.has(id))[0];
+winRecordState.cells.get(finalSafe).revealed=false;winRecordPage.advance(1800);
+winRecordPage.window.__game.activate(finalSafe,false);winRecordPage.window.__game.activate(finalSafe,false);
+assert.equal(winRecordPage.events.length,1);assert.equal(winRecordPage.events[0].detail.result,'won');assert.equal(winRecordPage.events[0].detail.durationMs,1800);
